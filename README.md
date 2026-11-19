@@ -6,6 +6,20 @@ GeoSandbox 是一个面向空间数据与三维模型的 WebGIS 工作台，可�
 
 打开在线展示，选择底部「模型」里的「加载示例」，即可体验二维地图、三维场景和模型定位。可通过「数据」导入示例 GeoJSON，或通过「交付」下载并重新打开 `.geosandbox` 项目包。展示版免登录，项目的操作和保存发生在浏览器中。
 
+## 界面预览
+
+### 三维装配方案
+
+![GeoSandbox 三维场景与模型整体变换方案预览](docs/previews/assembly-preview.png)
+
+### GeoJSON 导入检查
+
+![GeoSandbox 识别示例道路的 GeoJSON 格式并展示现有图层](docs/previews/data-inspection.png)
+
+### 项目包交付
+
+![GeoSandbox 深色模式下的项目包校验、打开和成果导出](docs/previews/project-delivery.png)
+
 ## 项目功能
 
 - **导入与检查** — 识别 GLB/glTF、GeoJSON、KML、常见 Shapefile ZIP、GeoPackage 和 GeoTIFF。使用格式、坐标参考系和源单位检查辅助定位。
