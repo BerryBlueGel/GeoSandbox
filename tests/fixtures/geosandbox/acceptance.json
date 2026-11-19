@@ -1,0 +1,108 @@
+{
+  "version": 1,
+  "baselineCommit": "cf8a34d",
+  "scope": "Common-format local mixed 2D/3D sandbox; these are constructed fixtures, not field-survey data.",
+  "cases": [
+    {
+      "id": "FMT-GLB",
+      "path": "apps/geolibre-desktop/public/geosandbox/teaching-block.glb",
+      "sha256": "247f013fad04e9666fa679cc67c43acddf346f12d25e0a433713f345b52e8b83",
+      "bytes": 10572,
+      "origin": "constructed-project-fixture",
+      "expectedFormat": "glb",
+      "expected": {
+        "dimensions": [37, 12.5, 17]
+      }
+    },
+    {
+      "id": "FMT-GLTF",
+      "path": "tests/fixtures/geosandbox/embedded.gltf",
+      "sha256": "b4741b110b43f221bdf7d1f78681c55eea68468dba9262e160d4e636fc0d2e8a",
+      "bytes": 12315,
+      "origin": "constructed-project-fixture",
+      "expectedFormat": "gltf",
+      "expected": {
+        "dimensions": [37, 12.5, 17]
+      }
+    },
+    {
+      "id": "FMT-GEOJSON",
+      "path": "apps/geolibre-desktop/public/geosandbox/footprints.geojson",
+      "sha256": "152bf0ae46939f3533e866d7aa7a40975044589e39e9951ec0070d6711954d84",
+      "bytes": 2141,
+      "origin": "constructed-project-fixture",
+      "expectedFormat": "geojson",
+      "expected": {
+        "features": 3
+      }
+    },
+    {
+      "id": "FMT-GPKG",
+      "path": "tests/fixtures/geosandbox/projected.gpkg",
+      "sha256": "1d17108a3e2cd8cda137f41a86cb78538d9cca05a1637584f089e5ef184cb17b",
+      "bytes": 98304,
+      "origin": "constructed-project-fixture",
+      "expectedFormat": "gpkg",
+      "expected": {
+        "crs": "EPSG:3857",
+        "layer": "buildings",
+        "features": 3
+      }
+    },
+    {
+      "id": "FMT-SHP",
+      "path": "tests/fixtures/geosandbox/shapefile.zip",
+      "sha256": "b3ab8b3461f8516e62bbec1b211d82ece72732030e26c97eb2f257a62175cbc7",
+      "bytes": 1012,
+      "origin": "constructed-project-fixture",
+      "expectedFormat": "zip",
+      "expected": {
+        "layer": "buildings",
+        "features": 3
+      }
+    },
+    {
+      "id": "FMT-TIFF",
+      "path": "tests/fixtures/geosandbox/rgb.tif",
+      "sha256": "d76340635bdd1ea4854ec53f0a821c7417054f1b831b90dc0216eb28fc1abf89",
+      "bytes": 8579,
+      "origin": "constructed-project-fixture",
+      "expectedFormat": "tif",
+      "expected": {
+        "crs": "EPSG:4326",
+        "width": 256,
+        "height": 256,
+        "bands": 3
+      }
+    },
+    {
+      "id": "FMT-BAD",
+      "path": "tests/fixtures/geosandbox/invalid.glb",
+      "sha256": "8a11825e93aac038dbf32bc7f77f13e70f50d23fe83075609a04ec73733a94e8",
+      "bytes": 82,
+      "origin": "constructed-project-fixture",
+      "expectedFormat": null,
+      "expected": {
+        "rejected": true
+      }
+    },
+    {
+      "id": "SAVE-BUNDLE",
+      "path": "examples/GeoSandbox完整流程验收.geosandbox",
+      "sha256": "ff03a26fc4de429be65e54dab832c7c26932c227944ba799e105af9ba3650ec5",
+      "bytes": 10889,
+      "origin": "constructed-project-fixture",
+      "expectedFormat": "geosandbox",
+      "expected": {
+        "layers": 6,
+        "modelInstances": 4,
+        "assets": 3
+      }
+    }
+  ],
+  "pending": [
+    "Representative real user datasets and expected outputs",
+    "Fixed hardware capacity measurements",
+    "Full M1 AI write-tool boundary review and long-job cancellation integration"
+  ]
+}

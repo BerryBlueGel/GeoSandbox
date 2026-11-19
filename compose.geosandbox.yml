@@ -1,0 +1,35 @@
+services:
+  geosandbox:
+    build:
+      context: .
+      args:
+        GEOLIBRE_JUPYTERLITE_REQUIRED: "0"
+    image: geosandbox:local
+    init: true
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${GEOSANDBOX_PORT:-8080}:80"
+    environment:
+      GEOSANDBOX_SERVER: "1"
+      GEOSANDBOX_PUBLIC_ORIGIN: "${GEOSANDBOX_PUBLIC_ORIGIN:?Set the HTTPS URL, without a trailing slash}"
+      GEOLIBRE_AUTH_USER: "${GEOLIBRE_AUTH_USER:?Set the owner username}"
+      GEOLIBRE_AUTH_PASSWORD: "${GEOLIBRE_AUTH_PASSWORD:?Set a private password}"
+      DEEPSEEK_API_KEY: "${DEEPSEEK_API_KEY:-}"
+      DEEPSEEK_MODEL: "${DEEPSEEK_MODEL:-deepseek-flash}"
+    volumes:
+      - type: bind
+        source: "${GEOSANDBOX_VOLUME:-./.geosandbox-server}"
+        target: /data
+    mem_limit: "${GEOSANDBOX_MEMORY_LIMIT:-6g}"
+    pids_limit: 256
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; [urllib.request.urlopen(url, timeout=3).close() for url in ('http://127.0.0.1/healthz', 'http://127.0.0.1:8765/health')]" ]
+      start_period: 30s
+      interval: 30s
+      timeout: 8s
+      retries: 3

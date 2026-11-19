@@ -1,0 +1,25 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "示例道路 1",
+        "width": 6
+      },
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [
+            118.1392,
+            39.6399
+          ],
+          [
+            118.1408,
+            39.6399
+          ]
+        ]
+      }
+    }
+  ]
+}

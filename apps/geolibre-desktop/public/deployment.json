@@ -1,0 +1,6 @@
+{
+  "version": 1,
+  "branding": { "appName": "GeoSandbox", "welcome": false },
+  "interface": { "enabled": false },
+  "ai": { "enabled": true, "model": "deepseek-flash" }
+}

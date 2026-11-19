@@ -1,0 +1,60 @@
+{
+  "format": "geosandbox-model-assembly",
+  "version": 1,
+  "crs": "WGS84",
+  "localAxes": "glTF right-handed Y-up, metres",
+  "importPlacement": {
+    "lng": 118.14023299012757,
+    "lat": 39.640045033680714,
+    "altitude": 3,
+    "bearing": 90,
+    "scale": 1
+  },
+  "heightNote": "Heights are the authored offsets. Terrain elevation is not baked into the exported meshes.",
+  "instances": [
+    {
+      "layerId": "02a7cd25-dcfe-4448-baa6-9de5c730ae83",
+      "name": "教学楼 A",
+      "placement": {
+        "lng": 118.14023299012757,
+        "lat": 39.640045033680714,
+        "altitude": 3,
+        "bearing": 15,
+        "scale": 1.1
+      }
+    },
+    {
+      "layerId": "02a7cd25-dcfe-4448-baa6-9de5c730ae83",
+      "name": "教学楼 A",
+      "placement": {
+        "lng": 118.14099938548158,
+        "lat": 39.64028484419152,
+        "altitude": 3,
+        "bearing": 105,
+        "scale": 1.1
+      }
+    },
+    {
+      "layerId": "02a7cd25-dcfe-4448-baa6-9de5c730ae83",
+      "name": "教学楼 A",
+      "placement": {
+        "lng": 118.13974066510968,
+        "lat": 39.64043172758265,
+        "altitude": 3,
+        "bearing": 15,
+        "scale": 0.935
+      }
+    },
+    {
+      "layerId": "501a9f9b-2a12-4a22-8ca3-9397afd9b35e",
+      "name": "unknown-model.dat",
+      "placement": {
+        "lng": 118.14026981426808,
+        "lat": 39.640151285442855,
+        "altitude": 3,
+        "bearing": 15,
+        "scale": 0.55
+      }
+    }
+  ]
+}

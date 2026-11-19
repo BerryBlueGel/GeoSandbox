@@ -1,0 +1,176 @@
+.gs-workspace {
+  --gs-canvas: #e9f0f8;
+  --gs-glow: #cce2ff;
+  --gs-line: #d6e1ef;
+  --gs-blue: #2458a6;
+  --gs-shadow: 0 10px 26px #153e7020, 0 2px 6px #153e7012;
+  background: radial-gradient(ellipse at 55% 100%, var(--gs-glow), transparent 54%),
+    var(--gs-canvas);
+}
+
+.dark .gs-workspace {
+  --gs-canvas: #101a29;
+  --gs-glow: #1b3759;
+  --gs-line: #314055;
+  --gs-blue: #a8ceff;
+  --gs-shadow: 0 10px 26px #03091266, 0 2px 6px #03091250;
+}
+
+.gs-workspace-toolbar {
+  margin: 8px 10px 6px;
+  border: 1px solid var(--gs-line);
+  border-radius: 14px;
+  padding-inline: 9px;
+  box-shadow: 0 2px 8px #153e7010;
+}
+
+.gs-workspace-toolbar > span:first-child {
+  gap: 8px;
+  padding-inline-end: 12px;
+  margin-inline-end: 4px;
+  border-inline-end: 1px solid var(--gs-line);
+  color: hsl(var(--foreground));
+}
+
+.gs-brand-avatar {
+  flex: none;
+  border-radius: 50%;
+  background: #daeaff;
+  box-shadow: 0 0 0 1px #718fb14d, 0 0 12px #6198ef30;
+}
+
+.gs-workspace:not([data-map-fullscreen]) [data-workspace-row] {
+  gap: 8px;
+  padding: 2px 10px 0;
+}
+
+.gs-workspace:not([data-map-fullscreen]) .gs-map-frame {
+  min-height: 0;
+  border: 1px solid var(--gs-line);
+  border-radius: 18px;
+  box-shadow: var(--gs-shadow);
+}
+
+.gs-workspace-inspector {
+  position: relative;
+  width: clamp(19rem, 28vw, 23rem);
+  flex-shrink: 0;
+  overflow: hidden;
+  border: 1px solid var(--gs-line);
+  border-radius: 18px;
+  background-image: linear-gradient(
+    155deg, color-mix(in srgb, var(--gs-glow) 42%, transparent), transparent 155px
+  );
+  box-shadow: var(--gs-shadow);
+}
+
+.gs-workspace-inspector > :first-child {
+  border-bottom: 1px solid var(--gs-line);
+}
+
+.gs-model-actions {
+  padding: 8px;
+  border: 1px solid var(--gs-line);
+  border-radius: 12px;
+  background: color-mix(in srgb, hsl(var(--card)) 76%, var(--gs-glow));
+}
+
+.gs-dock-shelf {
+  display: flex;
+  flex: none;
+  justify-content: center;
+  padding: 8px 10px;
+}
+
+.gs-dock {
+  display: flex;
+  gap: 4px;
+  padding: 4px 10px 3px;
+  border: 1px solid var(--gs-line);
+  border-radius: 16px;
+  background: color-mix(in srgb, hsl(var(--card)) 85%, var(--gs-glow));
+  box-shadow: var(--gs-shadow), inset 0 1px 0 #ffffff30;
+}
+
+.gs-dock-button {
+  display: grid;
+  width: clamp(3.35rem, 14vw, 4.75rem);
+  justify-items: center;
+  gap: 2px;
+  padding: 3px 0;
+  border-radius: 10px;
+  color: hsl(var(--muted-foreground));
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.gs-dock-button:focus-visible {
+  outline: 2px solid var(--gs-blue);
+  outline-offset: 1px;
+}
+
+.gs-dock-icon {
+  display: grid;
+  width: 36px;
+  height: 32px;
+  place-items: center;
+  border: 1px solid var(--gs-line);
+  border-radius: 10px;
+  background: hsl(var(--card));
+  color: hsl(var(--foreground));
+  transform-origin: center bottom;
+  transition: transform 180ms ease-out, box-shadow 180ms ease-out;
+}
+
+.gs-dock-button[aria-pressed="true"] {
+  color: var(--gs-blue);
+}
+
+.gs-dock-button[aria-pressed="true"] .gs-dock-icon {
+  border-color: color-mix(in srgb, var(--gs-blue) 32%, var(--gs-line));
+  background: color-mix(in srgb, var(--gs-glow) 68%, hsl(var(--card)));
+  color: var(--gs-blue);
+  box-shadow: 0 1px 10px color-mix(in srgb, var(--gs-blue) 20%, transparent);
+}
+
+@media (hover: hover) and (prefers-reduced-motion: no-preference) {
+  .gs-dock-button:hover .gs-dock-icon {
+    transform: translateY(-3px) scale(1.17);
+    box-shadow: 0 4px 13px color-mix(in srgb, var(--gs-blue) 24%, transparent);
+  }
+
+  .gs-dock-button:has(+ .gs-dock-button:hover) .gs-dock-icon,
+  .gs-dock-button:hover + .gs-dock-button .gs-dock-icon {
+    transform: translateY(-1px) scale(1.06);
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .gs-workspace-inspector {
+    animation: gs-inspector-enter 180ms ease-out both;
+  }
+
+  @keyframes gs-inspector-enter {
+    from {
+      opacity: 0;
+      transform: translateY(5px);
+    }
+  }
+}
+
+@media (max-width: 767px) {
+  .gs-workspace-toolbar {
+    margin-inline: 6px;
+  }
+
+  .gs-workspace:not([data-map-fullscreen]) [data-workspace-row] {
+    padding-inline: 6px;
+  }
+
+  .gs-workspace-inspector {
+    position: absolute;
+    inset: clamp(3.5rem, 29%, 12rem) 6px 0;
+    width: auto;
+  }
+}

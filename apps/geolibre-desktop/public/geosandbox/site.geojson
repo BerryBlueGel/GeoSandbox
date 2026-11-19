@@ -1,0 +1,39 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "构造场地",
+        "source": "constructed fixture"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              118.1389,
+              39.63935
+            ],
+            [
+              118.1411,
+              39.63935
+            ],
+            [
+              118.1411,
+              39.64084999999999
+            ],
+            [
+              118.1389,
+              39.64084999999999
+            ],
+            [
+              118.1389,
+              39.63935
+            ]
+          ]
+        ]
+      }
+    }
+  ]
+}

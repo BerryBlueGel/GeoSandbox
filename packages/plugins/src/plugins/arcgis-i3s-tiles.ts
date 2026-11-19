@@ -1,0 +1,1044 @@
+// ArcGIS I3S (Indexed 3D Scene Layer) support, rendered through a deck.gl
+// Tile3DLayer + @loaders.gl/i3s I3SLoader in a @deck.gl/mapbox MapboxOverlay.
+//
+// This mirrors the Google Photorealistic 3D Tiles overlay in maplibre-3d-tiles.ts
+// (same lazy mount / store-driven render / mercator-forcing lifecycle) but for
+// ArcGIS Scene Layers: mesh scene layers (3D Object + Integrated Mesh) served
+// from a SceneServer REST endpoint. The layer is added to the store as a
+// `3d-tiles` layer with a distinct source kind so the main Layers panel manages
+// its visibility/opacity/removal, which this overlay reflects.
+
+import {
+  DEFAULT_LAYER_STYLE,
+  i3sGroundOffset,
+  mergeI3sBuildingSelection,
+  type GeoLibreLayer,
+  useAppStore,
+} from "@geolibre/core";
+import {
+  I3S_LAYER_DOCUMENT_RE,
+  i3sBuildingSublayerUrl,
+  i3sLayerDocumentUrl,
+  isI3sBuildingLayerDocument,
+  parseI3sBuildingLayer,
+  visibleI3sBuildingSublayers,
+  type I3sBuildingState,
+} from "./i3s-building";
+import { createI3sMeshLayerClass, type I3sMeshLayerLuma } from "./i3s-mesh-layer";
+import { applyTilesetAltitudeOffset, type PositionedTileset } from "./tiles-altitude-offset";
+import type { Layer } from "@deck.gl/core";
+import type { MapboxOverlay } from "@deck.gl/mapbox";
+import type { GeoLibreAppAPI, GeoLibreDeckGL } from "../types";
+import {
+  acquireMercatorProjectionLock,
+  releaseMercatorProjectionLock,
+} from "./map-projection-utils";
+
+/** Source-kind tag stored on an ArcGIS I3S layer's source + metadata. */
+export const ARCGIS_I3S_SOURCE_KIND = "arcgis-i3s";
+const ARCGIS_I3S_LAYER_ID_PREFIX = "arcgis-i3s-tiles";
+
+/**
+ * Tile detail/memory caps shared by the deck.gl 3D-tiles overlays (this I3S
+ * overlay, the Google Photorealistic one, and the Mapbox one). Kept in one
+ * place so the overlays don't drift apart.
+ *
+ * `memoryAdjustedScreenSpaceError` stays off (issue #2560). @loaders.gl raises
+ * the error target by 2% for every tile that loads while GPU memory is over
+ * the cap, and only lowers it again as later tiles load, so a burst of loads
+ * while zooming in dropped Google tiles to a coarser level than the zoomed-out
+ * view and left them blurry until the next burst. The cache cap below bounds
+ * memory instead; see `applyThreeDTilesTilesetMemoryLimit`.
+ */
+export const THREE_D_TILES_TILESET_LOAD_LIMITS = {
+  maximumScreenSpaceError: 20,
+  maximumMemoryUsage: 512,
+  memoryAdjustedScreenSpaceError: false,
+} as const;
+
+/**
+ * Make a deck.gl overlay's tile cache honour `maximumMemoryUsage`.
+ *
+ * @loaders.gl's Tileset3D reads `options.maximumMemoryUsage` for the
+ * screen-space-error adjustment, but its tile cache trims against the
+ * `maximumMemoryUsage` field, which it never copies from the options and so
+ * stays at its 32 MB default. With Google Photorealistic tiles that evicts
+ * every tile the previous view drew as soon as the camera moves, so zooming in
+ * (or back out) re-downloads the scene and falls back to coarse ancestors in
+ * the meantime (issue #2560). Call this from each overlay's `onTilesetLoad`.
+ *
+ * @param tileset The tileset object passed to `onTilesetLoad`.
+ */
+export function applyThreeDTilesTilesetMemoryLimit(tileset: unknown): void {
+  if (
+    tileset &&
+    typeof tileset === "object" &&
+    typeof (tileset as { maximumMemoryUsage?: unknown }).maximumMemoryUsage === "number"
+  ) {
+    (tileset as { maximumMemoryUsage: number }).maximumMemoryUsage =
+      THREE_D_TILES_TILESET_LOAD_LIMITS.maximumMemoryUsage;
+  }
+}
+
+/**
+ * loaders.gl load options shared by the deck.gl 3D-tiles overlays (this I3S
+ * overlay and the Google Photorealistic one).
+ *
+ * `core.worker: false` parses tile content on the main thread instead of a
+ * loaders.gl worker. By default @loaders.gl fetches its worker scripts (the
+ * i3s-content worker here, draco/basis-texture workers for glTF content) from
+ * the unpkg CDN at runtime, which the Tauri desktop CSP (`worker-src 'self'
+ * blob:`, no unpkg in `script-src`) blocks — so tiles never render in the
+ * packaged app, and it would fail offline too. Disabling workers removes that
+ * external CDN dependency entirely; parsing runs in-process on every platform.
+ * The same restrictive `worker-src` applies to the nginx-served web build, so
+ * this is applied unconditionally rather than gated to Tauri. `worker` must be
+ * nested under `core` — that is the documented loaders.gl option shape; a
+ * top-level `worker` only works via a deprecated backwards-compat alias.
+ */
+export const THREE_D_TILES_DECK_LOAD_OPTIONS = {
+  tileset: THREE_D_TILES_TILESET_LOAD_LIMITS,
+  core: { worker: false },
+} as const;
+/**
+ * I3S loader options for the deck.gl overlay.
+ *
+ * By default loaders.gl turns every I3S vertex into an absolute Earth-centred
+ * position (`meter-offsets`), millions of metres from the origin, and the GPU
+ * stores those as 32-bit floats, which hold about half a metre at that size.
+ * Small geometry (window mullions, glass, railings) then collapsed into jagged
+ * spikes. `lnglat-offsets` keeps the vertices as the small offsets from the
+ * node's centre the service sends, which 32-bit floats hold to well under a
+ * millimetre; deck.gl's own I3S example loads scene layers this way.
+ */
+export const I3S_LOADER_OPTIONS = { coordinateSystem: "lnglat-offsets" } as const;
+
+/**
+ * Ask an ArcGIS Server for a Scene Layer document as JSON.
+ *
+ * A server answers `.../SceneServer/layers/<n>` with its HTML REST page unless
+ * the request says `f=json` (ArcGIS Online's `tiles.arcgis.com` hosts return
+ * JSON either way, which is why the bundled sample loads). The query cannot go
+ * on the URL the loader is given, because loaders.gl derives the node-page
+ * URLs from it, so it is added here, per request, to the layer document only.
+ *
+ * @param url - A URL the I3S loader is about to fetch.
+ * @returns The URL with `f=json` for a layer document, otherwise unchanged.
+ */
+export function i3sDocumentRequestUrl(url: string): string {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return url;
+  }
+  if (!I3S_LAYER_DOCUMENT_RE.test(parsed.pathname) || parsed.searchParams.has("f")) return url;
+  parsed.searchParams.set("f", "json");
+  return parsed.toString();
+}
+
+/** `fetch` for the I3S loader: layer documents as JSON, everything else as asked. */
+function fetchI3sResource(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  if (typeof input === "string" || input instanceof URL) {
+    return fetch(i3sDocumentRequestUrl(input instanceof URL ? input.href : input), init);
+  }
+  // Keep a Request's own method, headers and body; only its URL changes.
+  return fetch(new Request(i3sDocumentRequestUrl(input.url), input), init);
+}
+
+// ~1s at 60fps, matching GOOGLE_TILES_MAX_MOUNT_RETRIES so a slow project
+// restore has the same budget to wait for the map before giving up.
+const I3S_MAX_MOUNT_RETRIES = 60;
+
+// A Scene Layer service endpoint: ".../SceneServer" optionally followed by
+// "/layers/<n>". Covers ArcGIS Online (*.arcgis.com), ArcGIS Enterprise
+// portals, and hosted feature/scene services.
+const I3S_SCENE_SERVER_RE = /\/SceneServer(\/|$|\?|#)/i;
+
+let i3sOverlay: MapboxOverlay | null = null;
+let i3sOverlayMounted = false;
+let i3sDeckGL: GeoLibreDeckGL | null = null;
+/** The I3S mesh layer, built on first use (see i3s-mesh-layer.ts). */
+let i3sMeshLayerClass: unknown = null;
+/**
+ * The one attempt to build it. Kept as a promise so a failed load (which falls
+ * back to deck.gl's own mesh layer) is decided, and warned about, once.
+ */
+let i3sMeshLayerLoad: Promise<unknown> | null = null;
+
+/**
+ * Build the I3S mesh layer class from the loaded deck.gl and the luma.gl
+ * modules it shares, so the overlay draws I3S content on deck.gl 9.4.
+ */
+async function loadI3sMeshLayerClass(deckGL: GeoLibreDeckGL): Promise<unknown> {
+  const [{ Model }, { parsePBRMaterial }] = await Promise.all([
+    import("@luma.gl/engine"),
+    import("@luma.gl/gltf"),
+  ]);
+  return createI3sMeshLayerClass(deckGL.meshLayers.SimpleMeshLayer, {
+    Model: Model as unknown as I3sMeshLayerLuma["Model"],
+    parsePBRMaterial: parsePBRMaterial as unknown as I3sMeshLayerLuma["parsePBRMaterial"],
+  });
+}
+let i3sApp: GeoLibreAppAPI | null = null;
+let i3sBoundMap: unknown;
+let i3sStoreUnsubscribe: (() => void) | null = null;
+let i3sEnsureInFlight: Promise<void> | null = null;
+let lastI3sLayerSignature: string | null = null;
+// The signature without the offsets, to tell an offset-only change apart.
+let lastI3sStructureSignature: string | null = null;
+let i3sOffsetRenderTimer: ReturnType<typeof setTimeout> | null = null;
+// The signature the pending offset rebuild is waiting to draw.
+let pendingI3sSignature: string | null = null;
+/**
+ * An abort signal that fires after `ms`. `AbortSignal.timeout` is missing in
+ * some older WebViews, so it is built from an `AbortController` there.
+ */
+function timeoutSignal(ms: number): AbortSignal {
+  if (typeof AbortSignal.timeout === "function") return AbortSignal.timeout(ms);
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(), ms);
+  return controller.signal;
+}
+
+/** How long a layer-document probe may take before the layer draws without it. */
+const I3S_PROBE_TIMEOUT_MS = 15_000;
+/** How long the offsets must stay unchanged before the tileset is reloaded. */
+const I3S_OFFSET_SETTLE_MS = 400;
+// The map the terrain listener is bound to, and the terrain state last drawn.
+let i3sTerrainListenerMap: I3sTerrainEventMap | null = null;
+let i3sLastTerrain = false;
+let i3sMountRetryScheduled = false;
+let i3sMountRetries = 0;
+let i3sMountGaveUp = false;
+/** Ref-counted mercator lock key for this overlay (see map-projection-utils). */
+const I3S_PROJECTION_LOCK_KEY = ARCGIS_I3S_SOURCE_KIND;
+// I3SLoader is loaded lazily (it pulls in a fair amount of parsing code) the
+// first time an I3S layer is rendered, and cached here.
+let i3sLoaderPromise: Promise<unknown> | null = null;
+let i3sLoader: unknown = null;
+
+/**
+ * Whether a URL points at an ArcGIS I3S Scene Layer service.
+ *
+ * @param url The URL entered in the 3D Tiles panel.
+ * @returns True for a `.../SceneServer[/layers/N]` endpoint.
+ */
+export function isArcgisI3sSceneLayerUrl(url: string): boolean {
+  return I3S_SCENE_SERVER_RE.test(url.trim());
+}
+
+/**
+ * A friendly default layer name for an I3S URL: the service name (the path
+ * segment right before `/SceneServer`), e.g. `.../SF_Bldgs/SceneServer/layers/0`
+ * → `SF_Bldgs`. Falls back to `null` so callers can use their generic naming.
+ *
+ * @param url The Scene Layer URL.
+ * @returns The service name, or null if it can't be extracted.
+ */
+export function arcgisI3sSceneLayerName(url: string): string | null {
+  const match = url.trim().match(/\/([^/?#]+)\/SceneServer(?:\/|$|\?|#)/i);
+  if (!match) return null;
+  try {
+    // A malformed percent-escape makes decodeURIComponent throw URIError; fall
+    // back to the raw segment so a bad URL doesn't abort the add flow.
+    return decodeURIComponent(match[1]);
+  } catch {
+    return match[1];
+  }
+}
+
+/** Whether a store layer is an ArcGIS I3S tileset layer. */
+export function isArcgisI3sTilesLayer(layer: GeoLibreLayer): boolean {
+  return layer.type === "3d-tiles" && layer.metadata.sourceKind === ARCGIS_I3S_SOURCE_KIND;
+}
+
+/**
+ * The store record for an ArcGIS I3S scene layer.
+ *
+ * Exported so the renderers that draw I3S without the deck.gl overlay (the
+ * Cesium globe loads a scene service through `I3SDataProvider`) record the same
+ * shape, and above all the same `sourceKind`: that is the only thing both
+ * `isArcgisI3sTilesLayer` here and `cesium-layer-sync`'s `isI3sLayer` key off,
+ * so a scene service filed under any other kind is loaded as a plain tileset
+ * and never renders (issue #2505).
+ *
+ * @param options Scene Layer URL, display name, opacity, visibility.
+ * @returns The store layer, with a fresh id.
+ */
+export function createArcgisI3sStoreLayer(options: {
+  url: string;
+  name: string;
+  opacity: number;
+  visible: boolean;
+}): GeoLibreLayer {
+  const id = `${ARCGIS_I3S_LAYER_ID_PREFIX}-${crypto.randomUUID()}`;
+  const deckLayerId = `${id}-deck`;
+  const url = options.url.trim();
+
+  return {
+    id,
+    name: options.name,
+    type: "3d-tiles",
+    source: {
+      sourceId: id,
+      type: ARCGIS_I3S_SOURCE_KIND,
+      url,
+    },
+    visible: options.visible,
+    opacity: options.opacity,
+    style: { ...DEFAULT_LAYER_STYLE },
+    metadata: {
+      customLayerType: ARCGIS_I3S_SOURCE_KIND,
+      externalDeckLayer: true,
+      externalNativeLayer: true,
+      identifiable: false,
+      nativeLayerIds: [deckLayerId],
+      sourceId: id,
+      sourceKind: ARCGIS_I3S_SOURCE_KIND,
+    },
+    sourcePath: url,
+  };
+}
+
+/**
+ * Add an ArcGIS I3S scene layer to the store and ensure the deck.gl overlay is
+ * mounted. Managed thereafter from the main Layers panel.
+ *
+ * @param app The GeoLibre app API.
+ * @param options Scene Layer URL, display name, opacity, visibility, flyTo.
+ * @returns The new store layer id.
+ */
+export function addArcgisI3sTilesLayer(
+  app: GeoLibreAppAPI,
+  options: {
+    url: string;
+    name: string;
+    opacity: number;
+    visible: boolean;
+    flyTo: boolean;
+  },
+): string {
+  const layer = createArcgisI3sStoreLayer(options);
+  const id = layer.id;
+
+  useAppStore.getState().addLayer(layer);
+
+  if (options.flyTo) i3sFlyToRequested.add(id);
+  void ensureArcgisI3sTilesOverlay(app);
+  return id;
+}
+
+// Layer ids awaiting an initial flyTo once their tileset metadata loads.
+const i3sFlyToRequested = new Set<string>();
+
+/**
+ * Re-mount the overlay for any ArcGIS I3S layers present in the store, e.g.
+ * after a project is reopened.
+ */
+export function restoreArcgisI3sTilesLayers(app: GeoLibreAppAPI): void {
+  // Clear session-scoped failed probes so reopening a project probes again.
+  i3sProbesFailed.clear();
+  if (useAppStore.getState().layers.some(isArcgisI3sTilesLayer)) {
+    void ensureArcgisI3sTilesOverlay(app);
+  }
+}
+
+function ensureArcgisI3sTilesOverlay(app: GeoLibreAppAPI): Promise<void> {
+  if (i3sEnsureInFlight) return i3sEnsureInFlight;
+  // Both call sites are fire-and-forget, so log any failure here rather than
+  // leaving it as an unhandled rejection with no clue why the layer never
+  // rendered.
+  i3sEnsureInFlight = runEnsureArcgisI3sTilesOverlay(app)
+    .catch((error) => {
+      console.error("[GeoLibre] Failed to initialize the ArcGIS I3S overlay", error);
+    })
+    .finally(() => {
+      i3sEnsureInFlight = null;
+    });
+  return i3sEnsureInFlight;
+}
+
+/**
+ * Load deck.gl, the I3S loader, and the replacement mesh layer, then bind the
+ * MapboxOverlay and store subscription to the active map instance.
+ *
+ * @param app - The GeoLibre app API.
+ */
+async function runEnsureArcgisI3sTilesOverlay(app: GeoLibreAppAPI): Promise<void> {
+  i3sApp = app;
+  if (!app.getDeckGL) return;
+  i3sDeckGL ??= await app.getDeckGL();
+  i3sLoader ??= await loadI3sLoader();
+  // Without the replacement layer deck.gl's own mesh layer is used: the scene
+  // may not draw on deck.gl 9.4, but the overlay, fly-to and visibility work.
+  i3sMeshLayerLoad ??= loadI3sMeshLayerClass(i3sDeckGL).catch((error) => {
+    console.warn("[GeoLibre] Using deck.gl's default I3S mesh layer", error);
+    return null;
+  });
+  i3sMeshLayerClass = await i3sMeshLayerLoad;
+
+  const map = app.getMap?.() ?? app.getMapboxMap?.() ?? null;
+  if (i3sOverlay && i3sBoundMap === map) {
+    renderArcgisI3sTilesLayers();
+    return;
+  }
+
+  if (i3sOverlay && i3sOverlayMounted) {
+    try {
+      app.removeMapControl(i3sOverlay);
+    } catch (error) {
+      console.warn(
+        "[GeoLibre] Failed to detach the ArcGIS I3S overlay from the previous map",
+        error,
+      );
+    }
+  }
+  i3sBoundMap = map;
+  bindI3sTerrainListener(map);
+  // Overlaid (not interleaved): I3S mesh tiles use the METER_OFFSETS coordinate
+  // system, which the interleaved MapboxOverlay renderer rejects ("Invalid
+  // coordinateSystem: 2"). Overlaid mode renders deck on its own canvas above
+  // the map and supports it; buildings are not depth-composited with the
+  // basemap, which is fine for a scene-layer overlay.
+  i3sOverlay = new i3sDeckGL.mapbox.MapboxOverlay({
+    interleaved: false,
+    layers: [],
+  });
+  i3sOverlayMounted = false;
+  lastI3sLayerSignature = null;
+  i3sMountRetries = 0;
+  i3sMountGaveUp = false;
+  i3sStoreUnsubscribe ??= useAppStore.subscribe((state, previous) => {
+    if (state.layers !== previous.layers) {
+      const currentIds = new Set(state.layers.filter(isArcgisI3sTilesLayer).map(({ id }) => id));
+      for (const layer of previous.layers) {
+        if (isArcgisI3sTilesLayer(layer) && !currentIds.has(layer.id)) {
+          i3sFlyToRequested.delete(layer.id);
+          i3sProbesFailed.delete(i3sProbeKey(layer));
+        }
+      }
+      renderArcgisI3sTilesLayers();
+    }
+  });
+  renderArcgisI3sTilesLayers();
+}
+
+/** Lazily import the I3SLoader from @loaders.gl/i3s. */
+function loadI3sLoader(): Promise<unknown> {
+  // Clear the cache on failure so a transient chunk-load error (flaky network,
+  // stale CDN after a deploy, ad blocker) doesn't permanently break the feature
+  // — the next add/restore can retry instead of awaiting a rejected promise.
+  i3sLoaderPromise ??= import("@loaders.gl/i3s")
+    .then((m) => m.I3SLoader)
+    .catch((error) => {
+      i3sLoaderPromise = null;
+      throw error;
+    });
+  return i3sLoaderPromise;
+}
+
+/**
+ * Synchronize the mounted deck.gl I3S overlay with the store's current I3S
+ * layers, probing any unprobed layers and tearing the overlay down when the
+ * last I3S layer is removed.
+ */
+function renderArcgisI3sTilesLayers(): void {
+  if (!i3sOverlay || !i3sDeckGL || !i3sApp) return;
+
+  const layers = useAppStore.getState().layers.filter(isArcgisI3sTilesLayer);
+
+  // Tear the overlay down once the last I3S layer is gone, so an empty deck.gl
+  // overlay is not left attached for the rest of the session.
+  if (layers.length === 0) {
+    if (i3sOverlayMounted) {
+      try {
+        i3sApp.removeMapControl(i3sOverlay);
+      } catch (error) {
+        console.warn("[GeoLibre] Failed to remove the empty ArcGIS I3S overlay", error);
+      }
+      i3sOverlayMounted = false;
+    }
+    lastI3sLayerSignature = null;
+    i3sMountRetries = 0;
+    i3sMountGaveUp = false;
+    restoreI3sPreviousProjection();
+    return;
+  }
+
+  forceI3sMercatorProjection(i3sApp);
+
+  if (!i3sOverlayMounted) {
+    if (!i3sApp.addMapControl(i3sOverlay, "top-left")) {
+      scheduleI3sMountRetry();
+      return;
+    }
+    i3sOverlayMounted = true;
+    i3sMountRetries = 0;
+    i3sMountGaveUp = false;
+    i3sBoundMap = i3sApp.getMap?.() ?? i3sApp.getMapboxMap?.() ?? null;
+    // Remounting after the last layer was removed can land on a new map.
+    bindI3sTerrainListener(i3sBoundMap);
+    lastI3sLayerSignature = null;
+    lastI3sStructureSignature = null;
+  }
+
+  // The store subscription fires on ANY layer-set change; skip rebuilding the
+  // deck layers (which would re-fetch the tileset) when nothing about the I3S
+  // layers themselves changed.
+  // Probe before the unchanged-signature return, so a restore (which clears
+  // the failed probes) retries them even when nothing else changed.
+  for (const layer of layers) {
+    if (!i3sProbeIsCurrent(layer) && !i3sProbesFailed.has(i3sProbeKey(layer))) {
+      void probeI3sLayerKind(layer);
+    }
+  }
+
+  const signature = i3sLayerSignature(layers);
+  if (signature === lastI3sLayerSignature) {
+    // An offset edited and then reverted before the rebuild: nothing to do.
+    cancelI3sOffsetRender();
+    return;
+  }
+  // A new offset builds a new deck layer, which reloads the tileset. When only
+  // the offsets changed (typing in the Height offset field, a terrain switch),
+  // wait until they settle rather than reloading on every keystroke.
+  const structure = i3sLayerSignature(layers, false);
+  if (lastI3sLayerSignature !== null && structure === lastI3sStructureSignature) {
+    // Restart the wait only when the offsets moved again, not when an
+    // unrelated store change re-runs this.
+    if (signature !== pendingI3sSignature) {
+      pendingI3sSignature = signature;
+      scheduleI3sOffsetRender();
+    }
+    return;
+  }
+  cancelI3sOffsetRender();
+  lastI3sLayerSignature = signature;
+  lastI3sStructureSignature = structure;
+
+  const deckLayers = layers
+    .filter((layer) => layer.visible)
+    .flatMap((layer) => buildArcgisI3sTilesDeckLayers(layer))
+    .reverse();
+
+  i3sOverlay.setProps({ layers: deckLayers });
+}
+
+function scheduleI3sMountRetry(): void {
+  if (i3sMountRetryScheduled || i3sMountGaveUp || typeof requestAnimationFrame === "undefined") {
+    return;
+  }
+  if (i3sMountRetries >= I3S_MAX_MOUNT_RETRIES) {
+    i3sMountGaveUp = true;
+    console.warn(
+      "[GeoLibre] Gave up mounting the ArcGIS I3S overlay after repeated addMapControl failures.",
+    );
+    return;
+  }
+  i3sMountRetries += 1;
+  i3sMountRetryScheduled = true;
+  requestAnimationFrame(() => {
+    i3sMountRetryScheduled = false;
+    renderArcgisI3sTilesLayers();
+  });
+}
+
+/** Rebuild the I3S deck layers once the offsets have stopped changing. */
+function scheduleI3sOffsetRender(): void {
+  if (i3sOffsetRenderTimer !== null) clearTimeout(i3sOffsetRenderTimer);
+  i3sOffsetRenderTimer = setTimeout(() => {
+    i3sOffsetRenderTimer = null;
+    pendingI3sSignature = null;
+    lastI3sStructureSignature = null;
+    renderArcgisI3sTilesLayers();
+  }, I3S_OFFSET_SETTLE_MS);
+}
+
+/** Drop a pending offset rebuild. */
+function cancelI3sOffsetRender(): void {
+  if (i3sOffsetRenderTimer !== null) clearTimeout(i3sOffsetRenderTimer);
+  i3sOffsetRenderTimer = null;
+  pendingI3sSignature = null;
+}
+
+/**
+ * What the I3S deck layers are built from.
+ *
+ * @param layers - The store's I3S layers.
+ * @param withOffsets - Include each layer's vertical offset.
+ * @returns A string that changes whenever the deck layers must be rebuilt.
+ */
+function i3sLayerSignature(layers: GeoLibreLayer[], withOffsets = true): string {
+  return layers
+    .map((layer) => {
+      const building = layer.metadata.i3sBuilding as I3sBuildingState | undefined;
+      const sublayers = building ? visibleI3sBuildingSublayers(building).join(",") : "";
+      return `${layer.id}:${layer.visible ? 1 : 0}:${layer.opacity}:${
+        typeof layer.source.url === "string" ? layer.source.url : ""
+      }:${String(i3sLayerKind(layer) ?? "")}:${sublayers}${
+        withOffsets ? `:${i3sVerticalOffset(layer, i3sMapHasTerrain())}` : ""
+      }`;
+    })
+    .join("|");
+}
+
+// The deck.gl class + I3SLoader are injectable so a unit test can assert the
+// constructed Tile3DLayer's props (e.g. the CSP-critical loadOptions) without a
+// live map/overlay. Defaults are evaluated per call, so production callers pick
+// up the lazily-populated module globals.
+export function buildArcgisI3sTilesDeckLayer(
+  layer: GeoLibreLayer,
+  deps: I3sDeckDeps = {
+    deckGL: i3sDeckGL,
+    loader: i3sLoader,
+    meshLayer: i3sMeshLayerClass,
+  },
+  sublayer?: { url: string; id: number },
+): Layer | null {
+  const { deckGL, loader, meshLayer } = deps;
+  if (!deckGL || !loader) return null;
+  const url = sublayer?.url ?? (typeof layer.source.url === "string" ? layer.source.url : "");
+  if (!url) return null;
+  const offset = i3sVerticalOffset(layer, deps.terrain ?? i3sMapHasTerrain());
+  const baseId = sublayer ? `${layer.id}-deck-${sublayer.id}` : `${layer.id}-deck`;
+
+  const Tile3DLayer = deckGL.geoLayers.Tile3DLayer as unknown as new (
+    props: Record<string, unknown>,
+  ) => Layer;
+
+  return new Tile3DLayer({
+    // The offset is applied once, when the tileset loads, so a new offset needs
+    // a new layer (and tileset); an unshifted layer keeps its plain id.
+    id: offset === 0 ? baseId : `${baseId}@${offset}`,
+    data: url,
+    loader,
+    // Tile detail/memory caps + main-thread parsing, shared with the Google
+    // overlay. See THREE_D_TILES_DECK_LOAD_OPTIONS for why workers are disabled.
+    // Spread into a fresh object per layer (matching the Google call site) so no
+    // two layers share one loadOptions reference.
+    loadOptions: {
+      ...THREE_D_TILES_DECK_LOAD_OPTIONS,
+      core: { ...THREE_D_TILES_DECK_LOAD_OPTIONS.core, fetch: fetchI3sResource },
+      i3s: I3S_LOADER_OPTIONS,
+    },
+    opacity: layer.opacity,
+    pickable: false,
+    operation: "draw",
+    // deck.gl 9.4's own I3S mesh layer draws nothing on WebGL (its luma.gl
+    // PBR shading leaves every fragment transparent); see i3s-mesh-layer.ts.
+    ...(meshLayer ? { _subLayerProps: { mesh: { type: meshLayer } } } : {}),
+    onTilesetLoad: (tileset: unknown) => {
+      applyThreeDTilesTilesetMemoryLimit(tileset);
+      // Moves the culling bounds, and with them the origin loaders.gl gives each
+      // tile's mesh, so the scene and its tile selection move together.
+      applyTilesetAltitudeOffset(tileset as PositionedTileset, offset);
+      warnOnUnsupportedI3sSceneLayerType(url, tileset);
+      persistI3sTilesetCenter(layer.id, tileset);
+      flyToI3sTileset(layer.id, tileset);
+    },
+    // @loaders.gl/i3s tags mesh content with a numeric coordinateSystem
+    // (METER_OFFSETS = 2), but deck.gl 9 expects the string form
+    // ("meter-offsets"); remap it on load so getShaderCoordinateSystem accepts
+    // it instead of throwing "Invalid coordinateSystem: 2".
+    onTileLoad: (tile: unknown) => normalizeI3sTileCoordinateSystem(tile),
+    // The user types an arbitrary Scene Layer URL, so surface failures (bad
+    // URL, CORS-blocked portal, expired token, a service that isn't I3S)
+    // instead of letting the layer just never render with no explanation.
+    // @loaders.gl Tileset3D calls this as (tile, message, url) — note the deck.gl
+    // typings mislabel the order as (tile, url, message).
+    onTileError: (_tile: unknown, message: string, tileUrl: string) =>
+      console.error(`[GeoLibre] ArcGIS I3S tile failed to load: ${message} (${tileUrl})`),
+  });
+}
+
+/**
+ * The deck.gl layers for one I3S store layer: a single Tile3DLayer for a mesh
+ * scene layer, or one per visible sublayer of a Building Scene Layer.
+ *
+ * @param layer - The store layer.
+ * @param deps - Optional injectable deck.gl and loader dependencies for testing.
+ * @returns Its deck.gl layers (none while its type is still being probed).
+ */
+export function buildArcgisI3sTilesDeckLayers(layer: GeoLibreLayer, deps?: I3sDeckDeps): Layer[] {
+  const kind = i3sLayerKind(layer);
+  if (kind === "building") {
+    const state = layer.metadata.i3sBuilding as I3sBuildingState | undefined;
+    const base = layer.metadata.i3sBuildingUrl;
+    if (!state || typeof base !== "string") return [];
+    return visibleI3sBuildingSublayers(state)
+      .map((id) =>
+        buildArcgisI3sTilesDeckLayer(layer, deps, {
+          url: i3sBuildingSublayerUrl(base, id),
+          id,
+        }),
+      )
+      .filter((deckLayer): deckLayer is Layer => deckLayer !== null);
+  }
+  if (kind !== "mesh") return [];
+  const single = buildArcgisI3sTilesDeckLayer(layer, deps);
+  return single ? [single] : [];
+}
+
+/** I3S layers whose type probe is in flight, so each is probed once. */
+const i3sProbesInFlight = new Set<string>();
+/**
+ * I3S layers whose layer document could not be read this session. They are
+ * drawn as mesh layers, so the loader reports its own error, but nothing is
+ * written to the layer: a transient failure must not turn a Building Scene
+ * Layer into a mesh layer in the saved project, and the next session (or a
+ * reopened project) probes again.
+ */
+const i3sProbesFailed = new Set<string>();
+
+/** Key for a layer's probe state, including its URL so a URL edit probes again. */
+function i3sProbeKey(layer: GeoLibreLayer): string {
+  const url = typeof layer.source.url === "string" ? layer.source.url : "";
+  return `${layer.id}:${url}`;
+}
+
+/** The layer's source URL, or `""` when it has none. */
+function i3sLayerUrl(layer: GeoLibreLayer): string {
+  return typeof layer.source.url === "string" ? layer.source.url : "";
+}
+
+/**
+ * Whether the layer's recorded I3S kind was probed from its current URL. A
+ * layer saved before `i3sProbedUrl` was recorded is probed again once.
+ */
+function i3sProbeIsCurrent(layer: GeoLibreLayer): boolean {
+  return (
+    layer.metadata.i3sKind !== undefined &&
+    layer.metadata.i3sProbedUrl === i3sLayerUrl(layer) &&
+    // Layers probed before the base elevation was recorded are probed once more.
+    layer.metadata.i3sBaseElevation !== undefined
+  );
+}
+
+/**
+ * Whether the recorded kind was probed from a different URL than the current
+ * one, so its kind and Building sublayer tree must not be drawn.
+ */
+function i3sProbeIsStale(layer: GeoLibreLayer): boolean {
+  const probedUrl = layer.metadata.i3sProbedUrl;
+  return typeof probedUrl === "string" && probedUrl !== i3sLayerUrl(layer);
+}
+
+/** A layer's I3S kind: the probed one, `mesh` after a failed probe, else unknown. */
+function i3sLayerKind(layer: GeoLibreLayer): unknown {
+  const failed = i3sProbesFailed.has(i3sProbeKey(layer));
+  if (i3sProbeIsStale(layer)) return failed ? "mesh" : undefined;
+  // A layer probed before the base elevation was recorded waits for its
+  // re-probe, so it does not draw in the sky and then reload on the ground.
+  if (!failed && layer.metadata.i3sBaseElevation === undefined) return undefined;
+  return layer.metadata.i3sKind ?? (failed ? "mesh" : undefined);
+}
+
+/**
+ * Find out whether an I3S layer is a Building Scene Layer, from its layer
+ * document, and record it on the layer (`metadata.i3sKind`, plus the sublayer
+ * tree for a Building layer). A layer is drawn only once this is known, so a
+ * Building layer's root, which the I3S loader cannot draw, is never loaded.
+ * A URL that names no layer document is recorded as a mesh layer; a document
+ * that cannot be read is drawn as one for this session only.
+ *
+ * @param layer - The store layer to probe.
+ */
+export async function probeI3sLayerKind(layer: GeoLibreLayer): Promise<void> {
+  const key = i3sProbeKey(layer);
+  if (i3sProbesInFlight.has(key)) return;
+  i3sProbesInFlight.add(key);
+  const url = typeof layer.source.url === "string" ? layer.source.url : "";
+  const docUrl = i3sLayerDocumentUrl(url);
+  let patch: Record<string, unknown> = {
+    i3sKind: "mesh",
+    i3sProbedUrl: url,
+    i3sBuildingUrl: undefined,
+    i3sBuilding: undefined,
+    i3sBaseElevation: null,
+  };
+  if (docUrl) {
+    try {
+      // Bounded, so a stalled service falls back to drawing the layer (a saved
+      // layer waits for this probe) instead of hiding it indefinitely.
+      const response = await fetch(i3sDocumentRequestUrl(docUrl), {
+        signal: timeoutSignal(I3S_PROBE_TIMEOUT_MS),
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const doc: unknown = await response.json();
+      patch.i3sBaseElevation = i3sBaseElevation(doc);
+      if (isI3sBuildingLayerDocument(doc)) {
+        patch = {
+          ...patch,
+          i3sKind: "building",
+          i3sBuildingUrl: docUrl,
+          i3sBuilding: parseI3sBuildingLayer(doc),
+        };
+      }
+    } catch (error) {
+      console.warn(`[GeoLibre] Could not read the I3S layer document ${docUrl}`, error);
+      i3sProbesInFlight.delete(key);
+      const stillPresent = useAppStore
+        .getState()
+        .layers.some(
+          (item) =>
+            item.id === layer.id &&
+            (typeof item.source.url === "string" ? item.source.url : "") === url,
+        );
+      if (stillPresent) {
+        i3sProbesFailed.add(key);
+        lastI3sLayerSignature = null;
+        lastI3sStructureSignature = null;
+        renderArcgisI3sTilesLayers();
+      }
+      return;
+    }
+  }
+  i3sProbesInFlight.delete(key);
+  const current = useAppStore.getState().layers.find((item) => item.id === layer.id);
+  if (!current || (typeof current.source.url === "string" ? current.source.url : "") !== url) {
+    return;
+  }
+  // Re-probing the same URL (a layer saved before the base elevation was
+  // recorded) keeps the Building selection the user already made.
+  if (
+    patch.i3sKind === "building" &&
+    current.metadata.i3sProbedUrl === url &&
+    current.metadata.i3sBuilding
+  ) {
+    patch.i3sBuilding = mergeI3sBuildingSelection(
+      patch.i3sBuilding as I3sBuildingState,
+      current.metadata.i3sBuilding as I3sBuildingState,
+    );
+  }
+  useAppStore.getState().updateLayer(layer.id, { metadata: { ...current.metadata, ...patch } });
+}
+
+/**
+ * Probe every I3S layer in the store whose kind is not known yet, without the
+ * deck.gl overlay. The globe draws scene layers itself, so on Cesium nothing
+ * else reads the layer document: this records the Building sublayer tree (for
+ * the Style panel's Building section, which the globe honours) and the base
+ * elevation.
+ */
+export function probeArcgisI3sLayers(): void {
+  for (const layer of useAppStore.getState().layers) {
+    if (
+      isArcgisI3sTilesLayer(layer) &&
+      !i3sProbeIsCurrent(layer) &&
+      !i3sProbesFailed.has(i3sProbeKey(layer))
+    ) {
+      void probeI3sLayerKind(layer);
+    }
+  }
+}
+
+/** deck.gl and loader dependencies of the I3S deck layers, injectable for tests. */
+export interface I3sDeckDeps {
+  deckGL: GeoLibreDeckGL | null;
+  loader: unknown;
+  meshLayer?: unknown;
+  /** Whether the map draws 3D terrain; read from the bound map when omitted. */
+  terrain?: boolean;
+}
+
+/**
+ * The lowest elevation of an I3S layer's geometry, from its layer document.
+ *
+ * @param doc - The parsed layer document.
+ * @returns `fullExtent.zmin` in metres, or `null` when the document has none.
+ */
+export function i3sBaseElevation(doc: unknown): number | null {
+  const zmin = (doc as { fullExtent?: { zmin?: unknown } } | null)?.fullExtent?.zmin;
+  return typeof zmin === "number" && Number.isFinite(zmin) ? zmin : null;
+}
+
+/**
+ * How far to move an I3S layer vertically on the deck.gl overlay, in metres.
+ *
+ * Scene layers store absolute elevations (above the geoid, or a datum such as
+ * NAVD 88). With 3D terrain the map's ground is at those elevations too, but a
+ * flat map puts the ground at 0 m, so a building in an inland city floated
+ * hundreds of metres in the sky (issue #3374). On a flat map a layer whose
+ * geometry starts above 0 m is lowered so its base sits on the ground; one that
+ * already reaches 0 m or below (a coastal city such as San Francisco) is left
+ * where it is. The user's Height offset (`source.altitudeOffset`) is added on
+ * top in either case.
+ *
+ * The shift is one value for the whole layer, from its lowest point. That puts
+ * a single site on the ground; across a city-wide layer on hilly ground,
+ * buildings on higher ground still stand above the flat map by the height
+ * difference, which only 3D terrain (or the Height offset) can correct.
+ *
+ * @param layer - The I3S store layer.
+ * @param terrain - Whether the map draws 3D terrain.
+ * @returns The vertical offset in metres (positive is up).
+ */
+export function i3sVerticalOffset(layer: GeoLibreLayer, terrain: boolean): number {
+  const userOffset = Number(layer.source.altitudeOffset);
+  const ground = i3sGroundOffset(layer.metadata.i3sBaseElevation, terrain);
+  return (Number.isFinite(userOffset) ? userOffset : 0) + ground;
+}
+
+/** The map events the terrain listener needs (MapLibre and Mapbox share them). */
+interface I3sTerrainEventMap {
+  on?: (type: string, listener: () => void) => unknown;
+  off?: (type: string, listener: () => void) => unknown;
+  getTerrain?: () => unknown;
+}
+
+/** Whether the map the overlay is bound to currently draws 3D terrain. */
+function i3sMapHasTerrain(): boolean {
+  const map = i3sBoundMap as I3sTerrainEventMap | null | undefined;
+  try {
+    return Boolean(map?.getTerrain?.());
+  } catch {
+    // mapbox-gl throws while its style is still loading.
+    return false;
+  }
+}
+
+/** Redraw the I3S layers when the map's terrain is switched on or off. */
+function onI3sMapTerrainChange(): void {
+  const terrain = i3sMapHasTerrain();
+  if (terrain === i3sLastTerrain) return;
+  i3sLastTerrain = terrain;
+  renderArcgisI3sTilesLayers();
+}
+
+/**
+ * Listen for terrain changes on the map the overlay is bound to. MapLibre fires
+ * `terrain`; Mapbox changes terrain through the style, hence `styledata`.
+ *
+ * @param map - The newly bound map, or `null`.
+ */
+function bindI3sTerrainListener(map: unknown): void {
+  for (const type of ["terrain", "styledata"]) {
+    i3sTerrainListenerMap?.off?.(type, onI3sMapTerrainChange);
+  }
+  i3sTerrainListenerMap = (map as I3sTerrainEventMap | null) ?? null;
+  for (const type of ["terrain", "styledata"]) {
+    i3sTerrainListenerMap?.on?.(type, onI3sMapTerrainChange);
+  }
+  i3sLastTerrain = i3sMapHasTerrain();
+}
+
+/** deck.gl 9 numeric coordinate-system codes → their string equivalents. */
+const COORDINATE_SYSTEM_STRINGS: Record<number, string> = {
+  [-1]: "default",
+  0: "cartesian",
+  1: "lnglat",
+  2: "meter-offsets",
+  3: "lnglat-offsets",
+};
+
+/** Coerce a tile's numeric content coordinateSystem to deck.gl's string form. */
+function normalizeI3sTileCoordinateSystem(tile: unknown): void {
+  const content = (tile as { content?: { coordinateSystem?: unknown } } | null)?.content;
+  if (
+    content &&
+    typeof content.coordinateSystem === "number" &&
+    content.coordinateSystem in COORDINATE_SYSTEM_STRINGS
+  ) {
+    content.coordinateSystem = COORDINATE_SYSTEM_STRINGS[content.coordinateSystem];
+  }
+}
+
+/** Scene-layer types this mesh-only Tile3DLayer + I3SLoader pipeline renders. */
+const SUPPORTED_I3S_LAYER_TYPES = new Set(["3DObject", "IntegratedMesh"]);
+
+/**
+ * Warn when a loaded tileset is a scene-layer type this overlay can't render
+ * (e.g. an I3S PointCloud layer), which the mesh pipeline would otherwise fail
+ * to display with no explanation.
+ *
+ * @param url The Scene Layer URL, for context in the warning.
+ * @param tileset The tileset object passed to `onTilesetLoad`.
+ */
+function warnOnUnsupportedI3sSceneLayerType(url: string, tileset: unknown): void {
+  // @loaders.gl exposes the parsed SceneLayer under Tileset3D.tileset, but read
+  // the top level too in case a future version surfaces layerType directly. If
+  // neither is present the check just does nothing (the warning is best-effort).
+  const header = tileset as {
+    layerType?: unknown;
+    tileset?: { layerType?: unknown };
+  } | null;
+  const layerType = header?.tileset?.layerType ?? header?.layerType;
+  if (typeof layerType === "string" && !SUPPORTED_I3S_LAYER_TYPES.has(layerType)) {
+    console.warn(
+      `[GeoLibre] ArcGIS I3S scene layer type "${layerType}" is not supported ` +
+        "(only 3DObject and IntegratedMesh mesh layers render); this layer may " +
+        `not display: ${url}`,
+    );
+  }
+}
+
+/** Read a tileset's cartographic center as an [lng, lat] pair, if present. */
+export function i3sTilesetLngLat(tileset: unknown): [number, number] | null {
+  const center = (tileset as { cartographicCenter?: [number, number, number] } | null)
+    ?.cartographicCenter;
+  if (
+    !center ||
+    typeof center[0] !== "number" ||
+    typeof center[1] !== "number" ||
+    !Number.isFinite(center[0]) ||
+    !Number.isFinite(center[1]) ||
+    // Reject non-WGS84 / garbage centers so a buggy SceneServer response can't
+    // drive flyTo/fitLayer somewhere nonsensical (mirrors lngLatPairValue).
+    Math.abs(center[0]) > 180 ||
+    Math.abs(center[1]) > 90
+  ) {
+    return null;
+  }
+  return [center[0], center[1]];
+}
+
+/**
+ * Persist a loaded tileset's center into the layer metadata so the main Layers
+ * panel's "Zoom to layer" (MapController.fitLayer) works — an I3S layer has no
+ * geojson or MapLibre source, so `metadata.center` is its only bounds hint.
+ */
+export function persistI3sTilesetCenter(layerId: string, tileset: unknown): void {
+  const center = i3sTilesetLngLat(tileset);
+  if (!center) return;
+  const layer = useAppStore.getState().layers.find(({ id }) => id === layerId);
+  if (!layer || !isArcgisI3sTilesLayer(layer)) return;
+  // onTilesetLoad can fire more than once; skip the store write when unchanged.
+  const existing = layer.metadata.center;
+  if (Array.isArray(existing) && existing[0] === center[0] && existing[1] === center[1]) {
+    return;
+  }
+  useAppStore.getState().updateLayer(layerId, {
+    metadata: { ...layer.metadata, center },
+  });
+}
+
+/** Fly to a freshly-loaded tileset the first time, if the add requested it. */
+function flyToI3sTileset(layerId: string, tileset: unknown): void {
+  if (!i3sFlyToRequested.has(layerId) || !i3sApp) return;
+  const info = tileset as {
+    cartographicCenter?: [number, number, number];
+    zoom?: number;
+  } | null;
+  const center = info?.cartographicCenter;
+  const map = (i3sApp.getMap?.() ?? i3sApp.getMapboxMap?.()) as
+    | { flyTo?: (opts: Record<string, unknown>) => void }
+    | undefined;
+  // Only consume the fly-to request once we can actually fly, so a transient
+  // missing map/flyTo doesn't permanently drop it.
+  if (!center || !map?.flyTo) return;
+  i3sFlyToRequested.delete(layerId);
+  map.flyTo({
+    center: [center[0], center[1]],
+    zoom: typeof info?.zoom === "number" ? Math.max(0, info.zoom - 1) : 15,
+  });
+}
+
+function forceI3sMercatorProjection(app: GeoLibreAppAPI): void {
+  acquireMercatorProjectionLock(I3S_PROJECTION_LOCK_KEY, app, app.getMap?.());
+}
+
+function restoreI3sPreviousProjection(): void {
+  if (!i3sApp) return;
+  releaseMercatorProjectionLock(I3S_PROJECTION_LOCK_KEY, i3sApp);
+}

@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/png" href="%BASE_URL%favicon.png" sizes="32x32" />
+    <link rel="icon" href="%BASE_URL%favicon.ico" sizes="any" />
+    <link rel="apple-touch-icon" href="%BASE_URL%apple-touch-icon.png" />
+    <!-- viewport-fit=cover lets the page extend under the mobile status/nav bars
+         and display cutouts so env(safe-area-inset-*) report their sizes; the app
+         shell then pads itself by those insets (see #root in src/index.css). -->
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover"
+    />
+    <meta
+      name="description"
+      content="A free and open-source, lightweight, cloud-native GIS platform for visualizing, exploring, and analyzing geospatial data, running in the browser, on the desktop, on mobile, and inside Jupyter notebooks while keeping your data local and private."
+    />
+    <meta name="theme-color" content="#2f8f85" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <!-- Apple-prefixed variant kept for older iOS Safari (pre-17.4) home-screen
+         standalone mode; the standard tag above is what newer browsers expect. -->
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="GeoLibre" />
+    <title>GeoLibre</title>
+    <!-- Keep startup feedback independent of the JS/CSS module graph. React
+         replaces this content on its first render. Scope styles to the
+         placeholder so they cannot change the mounted app. -->
+    <style>
+      #startup-placeholder {
+        box-sizing: border-box;
+        position: fixed;
+        inset: 0;
+        overflow: auto;
+        padding: 12vh 24px 32px;
+        background: #f8fafc;
+        color: #1e293b;
+        font: 16px/1.6 system-ui, sans-serif;
+        text-align: center;
+        color-scheme: light dark;
+      }
+      #startup-placeholder h1 {
+        font-size: 24px;
+      }
+      #startup-placeholder p {
+        max-width: 36rem;
+        margin: 16px auto;
+      }
+      #startup-placeholder a {
+        color: #0f766e;
+        text-decoration: underline;
+        text-underline-offset: 3px;
+      }
+      #startup-placeholder a:focus-visible {
+        outline: 2px solid currentColor;
+        outline-offset: 4px;
+      }
+      @media (prefers-color-scheme: dark) {
+        #startup-placeholder {
+          background: #0f172a;
+          color: #e2e8f0;
+        }
+        #startup-placeholder a {
+          color: #5eead4;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root">
+      <!-- English fallback is intentional: this must work before i18next or
+           any other application script can load. -->
+      <main id="startup-placeholder" aria-labelledby="startup-title">
+        <h1 id="startup-title">Loading GeoLibre</h1>
+        <p>The first visit may take a little longer while the app downloads.</p>
+        <p>
+          If the app does not open, <a href="">Refresh page</a>. If it still does
+          not load, try a hard refresh (Ctrl+Shift+R on Windows/Linux or
+          Command+Shift+R on macOS), or open the app in a private window.
+        </p>
+        <noscript><p>JavaScript must be enabled to use GeoLibre.</p></noscript>
+      </main>
+    </div>
+    <script src="%BASE_URL%geolibre-runtime-config.js"></script>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

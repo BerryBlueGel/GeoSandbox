@@ -1,0 +1,25 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "示例道路 2",
+        "class": "walkway"
+      },
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [
+            118.1392,
+            39.6401
+          ],
+          [
+            118.1408,
+            39.6401
+          ]
+        ]
+      }
+    }
+  ]
+}
